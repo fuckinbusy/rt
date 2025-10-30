@@ -1,0 +1,8 @@
+.vscode
+*.exe
+dump
+*.txt
+rt_mem_dump
+test.c
+*.o
+*.a
