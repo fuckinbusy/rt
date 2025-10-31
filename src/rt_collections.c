@@ -712,9 +712,9 @@ void rt_hashtable_free(RT_HashTable *table)
     if (!table) return;
 
     for (size_t i = 0; i < table->buckets_count; ++i) {
-        RT_HTEntry *e = table->buckets[i].head;
+        RT_HTNode *e = table->buckets[i].head;
         while (e) {
-            RT_HTEntry *n = e->next;
+            RT_HTNode *n = e->next;
             free(e->key);
             free(e->value);
             free(e);
@@ -733,32 +733,37 @@ bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size
 {
     if (!table || !key || !value || value_size == 0) return false;
 
+    if (rt__hashtable_need_rehash(table)) {
+        size_t new_size = table->buckets_count * 2;
+        rt_hashtable_rehash(table, new_size);
+    }
+
     size_t bucket_index = rt__hashtable_bucket_getindex(table, key);
     RT_HTBucket *bucket = &table->buckets[bucket_index];
-    RT_HTEntry *cur_entry = bucket->head;
+    RT_HTNode *cur_node = bucket->head;
 
-    while (cur_entry) { // update if exists
-        if (strcmp(cur_entry->key, key) == 0) {
+    while (cur_node) { // update if exists
+        if (strcmp(cur_node->key, key) == 0) {
             printf("[RT] Insert operation | bucket_index:%zu, key:`%s`, value_pointer:%p, value:%d, value_size:%zu\n",
                 bucket_index, key, value, *(int*)value, value_size 
             );
-            return rt__hashtable_update_entry_value(cur_entry, value, value_size);
+            return rt__hashtable_update_node_value(cur_node, value, value_size);
         }
 
-        cur_entry = cur_entry->next;
+        cur_node = cur_node->next;
     }
 
-    // insert new entry
+    // insert new node
     size_t ksize = strlen(key) + 1;
-    RT_HTEntry *new_entry = rt__hashtable_entry_alloc(ksize, value_size);
-    if (!new_entry) return false;
+    RT_HTNode *new_node = rt__hashtable_node_alloc(ksize, value_size);
+    if (!new_node) return false;
 
-    strcpy_s(new_entry->key, ksize, key);
-    memcpy_s(new_entry->value, value_size, value, value_size);
-    new_entry->value_size = value_size;
+    strcpy_s(new_node->key, ksize, key);
+    memcpy_s(new_node->value, value_size, value, value_size);
+    new_node->value_size = value_size;
 
-    new_entry->next = bucket->head;
-    bucket->head = new_entry;
+    new_node->next = bucket->head;
+    bucket->head = new_node;
 
     bucket->count++;
     table->size++;
@@ -774,10 +779,10 @@ bool rt_hashtable_get(RT_HashTable *table, const char *key, void *out, size_t ou
 {
     if (!table || !key || !out || out_size == 0) return false;
 
-    RT_HTEntry *entry = rt__hashtable_get_entry(table, key);
-    if (!entry) return false;
-    if (out_size < entry->value_size) return false;
-    memcpy_s(out, out_size, entry->value, entry->value_size);
+    RT_HTNode *node = rt__hashtable_get_node(table, key);
+    if (!node) return false;
+    if (out_size < node->value_size) return false;
+    memcpy_s(out, out_size, node->value, node->value_size);
 
     return true;
 }
@@ -788,21 +793,21 @@ bool rt_hashtable_remove(RT_HashTable *table, const char *key)
 
     size_t bucket_index = rt__hashtable_bucket_getindex(table, key);
     RT_HTBucket *bucket = &table->buckets[bucket_index];
-    RT_HTEntry *entry = bucket->head;
-    RT_HTEntry *prev_entry = NULL;
+    RT_HTNode *node = bucket->head;
+    RT_HTNode *prev_node = NULL;
 
-    while (entry) {
-        if (strcmp(key, entry->key) == 0) {
-            free(entry->value);
-            free(entry->key);
+    while (node) {
+        if (strcmp(key, node->key) == 0) {
+            free(node->value);
+            free(node->key);
 
-            if (prev_entry) {
-                prev_entry->next = entry->next;
+            if (prev_node) {
+                prev_node->next = node->next;
             } else {
-                bucket->head = entry->next;
+                bucket->head = node->next;
             }
 
-            free(entry);
+            free(node);
             bucket->count--;
             table->size--;
 
@@ -811,8 +816,8 @@ bool rt_hashtable_remove(RT_HashTable *table, const char *key)
             return true;
         }
 
-        prev_entry = entry;
-        entry = entry->next;
+        prev_node = node;
+        node = node->next;
     }
 
     return false;
@@ -822,14 +827,44 @@ bool rt_hashtable_contains(RT_HashTable *table, const char *key)
 {
     if (!table || !key) return false;
 
-    RT_HTBucket *bucket = rt_hashtable_get_bucket(table, key);
-    RT_HTEntry *entry = rt_hashtable_entry_first(bucket);
-    if (!entry) return false;
+    RT_HTBucket *bucket = rt__hashtable_get_bucket(table, key);
+    RT_HTNode *node = rt_hashtable_node_first(bucket);
+    if (!node) return false;
 
     do {
-        if (strcmp(entry->key, key) == 0) 
+        if (strcmp(node->key, key) == 0) 
             return true;
-    } while ((entry = rt_hashtable_entry_next(entry)));
+    } while ((node = rt_hashtable_node_next(node)));
 
     return false;
 }
+
+bool rt_hashtable_rehash(RT_HashTable *table, size_t new_buckets_count)
+{
+    if (!table || new_buckets_count == 0) return false;
+
+    RT_HTBucket *new_buckets = calloc(new_buckets_count, sizeof(RT_HTBucket));
+    if (!new_buckets) return false;
+
+    for (size_t i = 0; i < table->buckets_count; ++i) {
+        RT_HTNode *node = table->buckets[i].head;
+        while (node) {
+            RT_HTNode *next_node = node->next;
+            size_t new_index = rt__hashtable_hash(node->key) % new_buckets_count;
+            RT_HTBucket *new_bucket = &new_buckets[new_index];
+
+            node->next = new_bucket->head;
+            new_bucket->head = node;
+            new_bucket->count++;
+
+            node = next_node;
+        }
+    }
+
+    free(table->buckets);
+    table->buckets = new_buckets;
+    table->buckets_count = new_buckets_count;
+    
+    return true;
+}
+

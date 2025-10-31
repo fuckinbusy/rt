@@ -261,17 +261,18 @@ static inline bool rt_fbuffer_is_empty(const RT_FileBuffer *buffer)
 }
 
 /* Hash Table (separate chaining) */
-#define RT_HASHTABLE_LOADFACTOR_MAX 0.79 // TODO implement this
+#define RT_HASHTABLE_LFACTOR_MAX 0.75
+#define RT_HASHTABLE_LFACTOR_MIN 0.25
 #define RT_HASHTABLE_INIT_BUCKETS_COUNT 256
-typedef struct _RT_HTEntry {
+typedef struct _RT_HTNode {
     char *key;
     void *value;
     size_t value_size;
-    struct _RT_HTEntry *next;
-} RT_HTEntry;
+    struct _RT_HTNode *next;
+} RT_HTNode;
 
 typedef struct _RT_HTBucket {
-    RT_HTEntry* head;
+    RT_HTNode* head;
     size_t count;
 } RT_HTBucket;
 
@@ -288,6 +289,7 @@ bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size
 bool rt_hashtable_get(RT_HashTable *table, const char *key, void *out, size_t out_size);
 bool rt_hashtable_remove(RT_HashTable *table, const char *key);
 bool rt_hashtable_contains(RT_HashTable *table, const char *key);
+bool rt_hashtable_rehash(RT_HashTable *table, size_t new_buckets_count);
 
 static inline size_t rt__hashtable_hash(const char *key)
 {
@@ -313,73 +315,86 @@ static inline bool rt_hashtable_is_empty(RT_HashTable *table)
     return !table || table->size == 0;
 }
 
-static inline RT_HTEntry *rt__hashtable_entry_alloc(size_t key_size, size_t value_size)
+static inline RT_HTNode *rt__hashtable_node_alloc(size_t key_size, size_t value_size)
 {
-    RT_HTEntry *entry = malloc(sizeof(RT_HTEntry));
-    if (!entry) goto allocation_failure_entry;
+    RT_HTNode *node = malloc(sizeof(RT_HTNode));
+    if (!node) goto allocation_failure_node;
 
-    entry->key = malloc(key_size);
-    if (!entry->key) goto allocation_failure_key;
+    node->key = malloc(key_size);
+    if (!node->key) goto allocation_failure_key;
 
-    entry->value = malloc(value_size);
-    if (!entry->value) goto allocation_failure_value;
+    node->value = malloc(value_size);
+    if (!node->value) goto allocation_failure_value;
     
-    entry->next = NULL;
-    entry->value_size = value_size;
-    return entry;
+    node->next = NULL;
+    node->value_size = value_size;
+    return node;
 
     allocation_failure_value:
-        free(entry->key);
+        free(node->key);
     allocation_failure_key:
-        free(entry);
-    allocation_failure_entry:
+        free(node);
+    allocation_failure_node:
         return NULL;
 }
 
-static inline bool rt__hashtable_update_entry_value(RT_HTEntry *entry, void *value, size_t vsize)
+static inline bool rt__hashtable_update_node_value(RT_HTNode *node, void *value, size_t vsize)
 {
-    void *new_value = entry->value 
-        ? realloc(entry->value, vsize)
+    void *new_value = node->value 
+        ? realloc(node->value, vsize)
         : malloc(vsize);
     if (!new_value) return false;
 
     memcpy_s(new_value, vsize, value, vsize);
-    entry->value = new_value;
-    entry->value_size = vsize;
+    node->value = new_value;
+    node->value_size = vsize;
 
     return true;
 }
 
-static inline RT_HTEntry* rt__hashtable_get_entry(RT_HashTable *table, const char *key)
+static inline RT_HTNode* rt__hashtable_get_node(RT_HashTable *table, const char *key)
 {
     size_t bi = rt__hashtable_bucket_getindex(table, key);
-    RT_HTEntry *entry = (&table->buckets[bi])->head;
+    RT_HTNode *node = (&table->buckets[bi])->head;
 
-    while (entry) {
-        if (strcmp(entry->key, key) == 0) {
-            return entry;
+    while (node) {
+        if (strcmp(node->key, key) == 0) {
+            return node;
         }
 
-        entry = entry->next;
+        node = node->next;
     }
 
     return NULL;
 }
 
-static inline RT_HTBucket* rt_hashtable_get_bucket(RT_HashTable *table, const char *key)
+static inline RT_HTBucket* rt__hashtable_get_bucket(RT_HashTable *table, const char *key)
 {
     const size_t bi = rt__hashtable_bucket_getindex(table, key);
     return &table->buckets[bi];;
 }
 
-static inline RT_HTEntry* rt_hashtable_entry_first(RT_HTBucket *bucket)
+static inline double rt__hashtable_lfactor(RT_HashTable *table)
+{
+    return table->size / table->buckets_count;
+}
+
+static inline bool rt__hashtable_need_rehash(RT_HashTable *table)
+{
+    double lfactor = rt__hashtable_lfactor(table);
+    if (lfactor > RT_HASHTABLE_LFACTOR_MAX) // lfactor < RT_HASHTABLE_LFACTOR_MIN
+        return true;
+    return false;
+}
+
+static inline RT_HTNode* rt_hashtable_node_first(RT_HTBucket *bucket)
 {
     return bucket ? bucket->head : NULL;
 }
 
-static inline RT_HTEntry* rt_hashtable_entry_next(RT_HTEntry *entry)
+static inline RT_HTNode* rt_hashtable_node_next(RT_HTNode *node)
 {
-    return entry ? entry->next : NULL;
+    return node ? node->next : NULL;
 }
 
 #endif // _INC_RT_COLLECTIONS
