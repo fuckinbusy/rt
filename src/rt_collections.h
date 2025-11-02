@@ -35,7 +35,8 @@ bool rt_array_pop(RT_Array *arr, void *out);
 bool rt_array_del(RT_Array *arr, size_t index);
 bool rt_array_set(RT_Array *arr, size_t index, const void *value);
 bool rt_array_get(RT_Array *arr, size_t index, void *out);
-void rt_array_find_if(RT_Array *arr, void *data, bool (*callback)(const void *data, void *user_data));
+void rt_array_find_if(RT_Array *arr, void *data, bool (*callback)(const void *arr_data, void *user_data));
+void rt_array_foreach(RT_Array *arr, bool (*callback)(void *arr_elem, size_t elem_index));
 
 static inline bool rt_array_is_empty(RT_Array *arr)
 {
@@ -261,9 +262,9 @@ static inline bool rt_fbuffer_is_empty(const RT_FileBuffer *buffer)
 }
 
 /* Hash Table (separate chaining) */
-#define RT_HASHTABLE_LFACTOR_MAX 0.75
-#define RT_HASHTABLE_LFACTOR_MIN 0.25
-#define RT_HASHTABLE_INIT_BUCKETS_COUNT 256
+#define RT_HASHMAP_LFACTOR_MAX 0.75
+#define RT_HASHMAP_LFACTOR_MIN 0.25
+#define RT_HASHMAP_INIT_BUCKETS_COUNT 256
 typedef struct _RT_HTNode {
     char *key;
     void *value;
@@ -276,22 +277,22 @@ typedef struct _RT_HTBucket {
     size_t count;
 } RT_HTBucket;
 
-typedef struct _RT_HashTable {
+typedef struct _RT_HashMap {
     RT_HTBucket *buckets;
     size_t buckets_count;
     size_t size;
     size_t (*hash_func)(const char *key);
-} RT_HashTable;
+} RT_HashMap;
 
-bool rt_hashtable_init(RT_HashTable *table, size_t buckets_num);
-void rt_hashtable_free(RT_HashTable *table);
-bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size_t value_size);
-bool rt_hashtable_get(RT_HashTable *table, const char *key, void *out, size_t out_size);
-bool rt_hashtable_remove(RT_HashTable *table, const char *key);
-bool rt_hashtable_contains(RT_HashTable *table, const char *key);
-bool rt_hashtable_rehash(RT_HashTable *table, size_t new_buckets_count);
+bool rt_hashmap_init(RT_HashMap *map, size_t buckets_num);
+void rt_hashmap_free(RT_HashMap *map);
+bool rt_hashmap_insert(RT_HashMap *map, const char *key, void *value, size_t value_size);
+bool rt_hashmap_get(RT_HashMap *map, const char *key, void *out, size_t out_size);
+bool rt_hashmap_remove(RT_HashMap *map, const char *key);
+bool rt_hashmap_contains(RT_HashMap *map, const char *key);
+bool rt_hashmap_rehash(RT_HashMap *map, size_t new_buckets_count);
 
-static inline size_t rt__hashtable_hash(const char *key)
+static inline size_t rt__hashmap_hash(const char *key)
 {
     if (!key) return 0;
     
@@ -305,17 +306,17 @@ static inline size_t rt__hashtable_hash(const char *key)
     return hash;
 }
 
-static inline size_t rt__hashtable_bucket_getindex(RT_HashTable *table, const char *key)
+static inline size_t rt__hashmap_bucket_getindex(RT_HashMap *map, const char *key)
 {
-    return rt__hashtable_hash(key) % table->buckets_count;
+    return rt__hashmap_hash(key) % map->buckets_count;
 }
 
-static inline bool rt_hashtable_is_empty(RT_HashTable *table)
+static inline bool rt_hashmap_is_empty(RT_HashMap *map)
 {
-    return !table || table->size == 0;
+    return !map || map->size == 0;
 }
 
-static inline RT_HTNode *rt__hashtable_node_alloc(size_t key_size, size_t value_size)
+static inline RT_HTNode *rt__hashmap_node_alloc(size_t key_size, size_t value_size)
 {
     RT_HTNode *node = malloc(sizeof(RT_HTNode));
     if (!node) goto allocation_failure_node;
@@ -338,7 +339,7 @@ static inline RT_HTNode *rt__hashtable_node_alloc(size_t key_size, size_t value_
         return NULL;
 }
 
-static inline bool rt__hashtable_update_node_value(RT_HTNode *node, void *value, size_t vsize)
+static inline bool rt__hashmap_update_node_value(RT_HTNode *node, void *value, size_t vsize)
 {
     void *new_value = node->value 
         ? realloc(node->value, vsize)
@@ -352,10 +353,10 @@ static inline bool rt__hashtable_update_node_value(RT_HTNode *node, void *value,
     return true;
 }
 
-static inline RT_HTNode* rt__hashtable_get_node(RT_HashTable *table, const char *key)
+static inline RT_HTNode* rt__hashmap_get_node(RT_HashMap *map, const char *key)
 {
-    size_t bi = rt__hashtable_bucket_getindex(table, key);
-    RT_HTNode *node = (&table->buckets[bi])->head;
+    size_t bi = rt__hashmap_bucket_getindex(map, key);
+    RT_HTNode *node = (&map->buckets[bi])->head;
 
     while (node) {
         if (strcmp(node->key, key) == 0) {
@@ -368,31 +369,31 @@ static inline RT_HTNode* rt__hashtable_get_node(RT_HashTable *table, const char 
     return NULL;
 }
 
-static inline RT_HTBucket* rt__hashtable_get_bucket(RT_HashTable *table, const char *key)
+static inline RT_HTBucket* rt__hashmap_get_bucket(RT_HashMap *map, const char *key)
 {
-    const size_t bi = rt__hashtable_bucket_getindex(table, key);
-    return &table->buckets[bi];;
+    const size_t bi = rt__hashmap_bucket_getindex(map, key);
+    return &map->buckets[bi];;
 }
 
-static inline double rt__hashtable_lfactor(RT_HashTable *table)
+static inline double rt__hashmap_lfactor(RT_HashMap *map)
 {
-    return table->size / table->buckets_count;
+    return (double)map->size / map->buckets_count;
 }
 
-static inline bool rt__hashtable_need_rehash(RT_HashTable *table)
+static inline bool rt__hashmap_need_rehash(RT_HashMap *map)
 {
-    double lfactor = rt__hashtable_lfactor(table);
-    if (lfactor > RT_HASHTABLE_LFACTOR_MAX) // lfactor < RT_HASHTABLE_LFACTOR_MIN
+    double lfactor = rt__hashmap_lfactor(map);
+    if (lfactor > RT_HASHMAP_LFACTOR_MAX) // lfactor < RT_HASHMAP_LFACTOR_MIN
         return true;
     return false;
 }
 
-static inline RT_HTNode* rt_hashtable_node_first(RT_HTBucket *bucket)
+static inline RT_HTNode* rt_hashmap_node_first(RT_HTBucket *bucket)
 {
     return bucket ? bucket->head : NULL;
 }
 
-static inline RT_HTNode* rt_hashtable_node_next(RT_HTNode *node)
+static inline RT_HTNode* rt_hashmap_node_next(RT_HTNode *node)
 {
     return node ? node->next : NULL;
 }

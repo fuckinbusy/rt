@@ -55,7 +55,7 @@ bool rt_array_pop(RT_Array *arr, void *out)
 {
     if (!arr || arr->size == 0) return false;
 
-    if (out) memcpy(out, (char*)arr->data + (arr->size * arr->elem_size), arr->elem_size);
+    if (out) memcpy(out, (char*)arr->data + ((arr->size - 1) * arr->elem_size), arr->elem_size);
     arr->size--;
 
     return true;
@@ -67,9 +67,9 @@ bool rt_array_del(RT_Array *arr, size_t index)
     
     char *src = (char*)arr->data + ((index + 1) * arr->elem_size);
     char *dst = (char*)arr->data + (index * arr->elem_size);
-    memmove(src, dst, arr->size * arr->elem_size);
+    memmove(dst, src, (arr->size - index - 1) * arr->elem_size);
+    
     arr->size--;
-
     return true;
 }
 
@@ -79,7 +79,7 @@ bool rt_array_set(RT_Array *arr, size_t index, const void *value)
 
     memcpy((char*)arr->data + (index * arr->elem_size), value, arr->elem_size);
 
-    return false;
+    return true;
 }
 
 bool rt_array_get(RT_Array *arr, size_t index, void *out)
@@ -89,12 +89,22 @@ bool rt_array_get(RT_Array *arr, size_t index, void *out)
     return true;
 }
 
-void rt_array_find_if(RT_Array *arr, void *data, bool (*callback)(const void *data, void *user_data))
+void rt_array_find_if(RT_Array *arr, void *data, bool (*callback)(const void *arr_data, void *user_data))
 {
     if (!(arr && callback) || arr->size == 0) return;
     
     for (size_t i = 0; i < arr->size; ++i) {
         if (callback((char*)arr->data + (i * arr->elem_size), data)) return;
+    }
+}
+
+void rt_array_foreach(RT_Array *arr, bool (*callback)(void *arr_elem, size_t elem_index))
+{
+    if (!arr || !callback) return;
+
+    for (size_t i = 0; i < arr->size; ++i) {
+        if (!callback((char*)arr->data + (i * arr->elem_size), i))
+            break;
     }
 }
 
@@ -156,7 +166,7 @@ bool rt_darray_set(RT_DynamicArray *arr, size_t index, const void *value)
 
 bool rt_darray_pop(RT_DynamicArray *arr, void *out)
 {
-    if (!arr || arr->size == 0 || !out) return false;
+    if (!arr || arr->size == 0) return false;
     arr->size--;
     memcpy(out, (char*)arr->data + arr->size * arr->element_size, arr->element_size);
 
@@ -544,27 +554,28 @@ size_t rt_fbuffer_read_file(RT_FileBuffer *buffer, const char *file_path)
     size_t fsize = ftell(f);
     rewind(f);
 
-    if (fsize == 0) {
-        fclose(f);
-        return 0;
-    }
+    if (fsize == 0)
+        goto cleanup;
 
     if (!rt__ensure_capacity(
         (void*)&buffer->data, 
         &buffer->capacity, 
         fsize, 
         RT_FBUFFER_INIT_CAP)
-    ) return 0;
+    ) goto cleanup;
     
-    if (fread(buffer->data, 1, fsize, f) != fsize) {
-        fclose(f);
-        return 0;
-    }
+    if (fread(buffer->data, 1, fsize, f) != fsize)
+        goto cleanup;
 
     buffer->size = fsize;
     
     fclose(f);
     return fsize;
+
+cleanup:
+    fclose(f);
+    buffer->size = 0;
+    return 0;
 }
 
 size_t rt_fbuffer_write_file(RT_FileBuffer *buffer, const char *file_path)
@@ -692,27 +703,27 @@ bool rt_fbuffer_fill_ex(RT_FileBuffer *buffer, uint8_t byte, size_t size)
     return rt_fbuffer_fill(buffer, byte);
 }
 
-bool rt_hashtable_init(RT_HashTable *table, size_t buckets_count)
+bool rt_hashmap_init(RT_HashMap *map, size_t buckets_count)
 {
-    if (!table) return false;
-    if (buckets_count == 0) buckets_count = RT_HASHTABLE_INIT_BUCKETS_COUNT;
+    if (!map) return false;
+    if (buckets_count == 0) buckets_count = RT_HASHMAP_INIT_BUCKETS_COUNT;
     
-    table->buckets = calloc(buckets_count, sizeof(RT_HTBucket));
-    if (!table->buckets) return false;
+    map->buckets = calloc(buckets_count, sizeof(RT_HTBucket));
+    if (!map->buckets) return false;
 
-    table->buckets_count = buckets_count;
-    table->size = 0;
-    table->hash_func = NULL;
+    map->buckets_count = buckets_count;
+    map->size = 0;
+    map->hash_func = NULL;
 
     return true;
 }
 
-void rt_hashtable_free(RT_HashTable *table)
+void rt_hashmap_free(RT_HashMap *map)
 {
-    if (!table) return;
+    if (!map) return;
 
-    for (size_t i = 0; i < table->buckets_count; ++i) {
-        RT_HTNode *e = table->buckets[i].head;
+    for (size_t i = 0; i < map->buckets_count; ++i) {
+        RT_HTNode *e = map->buckets[i].head;
         while (e) {
             RT_HTNode *n = e->next;
             free(e->key);
@@ -722,32 +733,29 @@ void rt_hashtable_free(RT_HashTable *table)
         }
     }
 
-    free(table->buckets);
-    table->buckets = NULL;
-    table->hash_func = NULL;
-    table->buckets_count = 0;
-    table->size = 0;
+    free(map->buckets);
+    map->buckets = NULL;
+    map->hash_func = NULL;
+    map->buckets_count = 0;
+    map->size = 0;
 }
 
-bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size_t value_size)
+bool rt_hashmap_insert(RT_HashMap *map, const char *key, void *value, size_t value_size)
 {
-    if (!table || !key || !value || value_size == 0) return false;
+    if (!map || !key || !value || value_size == 0) return false;
 
-    if (rt__hashtable_need_rehash(table)) {
-        size_t new_size = table->buckets_count * 2;
-        rt_hashtable_rehash(table, new_size);
+    if (rt__hashmap_need_rehash(map)) {
+        size_t new_size = map->buckets_count * 2;
+        rt_hashmap_rehash(map, new_size);
     }
 
-    size_t bucket_index = rt__hashtable_bucket_getindex(table, key);
-    RT_HTBucket *bucket = &table->buckets[bucket_index];
+    size_t bucket_index = rt__hashmap_bucket_getindex(map, key);
+    RT_HTBucket *bucket = &map->buckets[bucket_index];
     RT_HTNode *cur_node = bucket->head;
 
     while (cur_node) { // update if exists
         if (strcmp(cur_node->key, key) == 0) {
-            printf("[RT] Insert operation | bucket_index:%zu, key:`%s`, value_pointer:%p, value:%d, value_size:%zu\n",
-                bucket_index, key, value, *(int*)value, value_size 
-            );
-            return rt__hashtable_update_node_value(cur_node, value, value_size);
+            return rt__hashmap_update_node_value(cur_node, value, value_size);
         }
 
         cur_node = cur_node->next;
@@ -755,7 +763,7 @@ bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size
 
     // insert new node
     size_t ksize = strlen(key) + 1;
-    RT_HTNode *new_node = rt__hashtable_node_alloc(ksize, value_size);
+    RT_HTNode *new_node = rt__hashmap_node_alloc(ksize, value_size);
     if (!new_node) return false;
 
     strcpy_s(new_node->key, ksize, key);
@@ -766,20 +774,16 @@ bool rt_hashtable_insert(RT_HashTable *table, const char *key, void *value, size
     bucket->head = new_node;
 
     bucket->count++;
-    table->size++;
-
-    printf("[RT] Inserted hashtable element | bucket_index:%zu, key:`%s`, value_pointer:%p, value:%d, value_size:%zu\n",
-       bucket_index, key, value, *(int*)value, value_size 
-    );
+    map->size++;
 
     return true;
 }
 
-bool rt_hashtable_get(RT_HashTable *table, const char *key, void *out, size_t out_size)
+bool rt_hashmap_get(RT_HashMap *map, const char *key, void *out, size_t out_size)
 {
-    if (!table || !key || !out || out_size == 0) return false;
+    if (!map || !key || !out || out_size == 0) return false;
 
-    RT_HTNode *node = rt__hashtable_get_node(table, key);
+    RT_HTNode *node = rt__hashmap_get_node(map, key);
     if (!node) return false;
     if (out_size < node->value_size) return false;
     memcpy_s(out, out_size, node->value, node->value_size);
@@ -787,12 +791,12 @@ bool rt_hashtable_get(RT_HashTable *table, const char *key, void *out, size_t ou
     return true;
 }
 
-bool rt_hashtable_remove(RT_HashTable *table, const char *key)
+bool rt_hashmap_remove(RT_HashMap *map, const char *key)
 {
-    if (!table || !key) return false;
+    if (!map || !key) return false;
 
-    size_t bucket_index = rt__hashtable_bucket_getindex(table, key);
-    RT_HTBucket *bucket = &table->buckets[bucket_index];
+    size_t bucket_index = rt__hashmap_bucket_getindex(map, key);
+    RT_HTBucket *bucket = &map->buckets[bucket_index];
     RT_HTNode *node = bucket->head;
     RT_HTNode *prev_node = NULL;
 
@@ -809,9 +813,7 @@ bool rt_hashtable_remove(RT_HashTable *table, const char *key)
 
             free(node);
             bucket->count--;
-            table->size--;
-
-            printf("[RT] Removed hashtable element | bucket_index:%zu, key:`%s`\n", bucket_index, key);
+            map->size--;
 
             return true;
         }
@@ -823,34 +825,34 @@ bool rt_hashtable_remove(RT_HashTable *table, const char *key)
     return false;
 }
 
-bool rt_hashtable_contains(RT_HashTable *table, const char *key)
+bool rt_hashmap_contains(RT_HashMap *map, const char *key)
 {
-    if (!table || !key) return false;
+    if (!map || !key) return false;
 
-    RT_HTBucket *bucket = rt__hashtable_get_bucket(table, key);
-    RT_HTNode *node = rt_hashtable_node_first(bucket);
+    RT_HTBucket *bucket = rt__hashmap_get_bucket(map, key);
+    RT_HTNode *node = rt_hashmap_node_first(bucket);
     if (!node) return false;
 
     do {
         if (strcmp(node->key, key) == 0) 
             return true;
-    } while ((node = rt_hashtable_node_next(node)));
+    } while ((node = rt_hashmap_node_next(node)));
 
     return false;
 }
 
-bool rt_hashtable_rehash(RT_HashTable *table, size_t new_buckets_count)
+bool rt_hashmap_rehash(RT_HashMap *map, size_t new_buckets_count)
 {
-    if (!table || new_buckets_count == 0) return false;
+    if (!map || new_buckets_count == 0) return false;
 
     RT_HTBucket *new_buckets = calloc(new_buckets_count, sizeof(RT_HTBucket));
     if (!new_buckets) return false;
 
-    for (size_t i = 0; i < table->buckets_count; ++i) {
-        RT_HTNode *node = table->buckets[i].head;
+    for (size_t i = 0; i < map->buckets_count; ++i) {
+        RT_HTNode *node = map->buckets[i].head;
         while (node) {
             RT_HTNode *next_node = node->next;
-            size_t new_index = rt__hashtable_hash(node->key) % new_buckets_count;
+            size_t new_index = rt__hashmap_hash(node->key) % new_buckets_count;
             RT_HTBucket *new_bucket = &new_buckets[new_index];
 
             node->next = new_bucket->head;
@@ -861,9 +863,9 @@ bool rt_hashtable_rehash(RT_HashTable *table, size_t new_buckets_count)
         }
     }
 
-    free(table->buckets);
-    table->buckets = new_buckets;
-    table->buckets_count = new_buckets_count;
+    free(map->buckets);
+    map->buckets = new_buckets;
+    map->buckets_count = new_buckets_count;
     
     return true;
 }
